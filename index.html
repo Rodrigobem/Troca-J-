@@ -101,6 +101,30 @@ const getNivel=xp=>[...NIVEIS].reverse().find(n=>xp>=n.min)||NIVEIS[0];
 const uid_gen=()=>`${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
 const readFile=f=>new Promise(res=>{const r=new FileReader();r.onload=e=>res({url:e.target.result,type:f.type.startsWith("video")?"video":"image"});r.readAsDataURL(f)});
 
+// Taxa split: 5% total = franqueadora 3% + franqueados 2%
+// Mesmo condo: franqueado recebe 2%; Condo diferente: cada franqueado 1%
+const calcTaxas=(preco,nacional)=>{
+  const total=Math.round(preco*0.05);
+  const franqueadora=Math.round(preco*0.03);
+  const franqueados=total-franqueadora; // 2%
+  return{total,franqueadora,franqueado_comprador:nacional?Math.round(preco*0.01):franqueados,franqueado_vendedor:nacional?Math.round(preco*0.01):0};
+};
+
+// Export to CSV
+const exportCSV=(rows,filename)=>{
+  const cols=Object.keys(rows[0]);
+  const csv=[cols.join(","),...rows.map(r=>cols.map(c=>`"${(r[c]||"").toString().replace(/"/g,'""')}"`).join(","))].join("\n");
+  const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);a.download=filename;a.click();
+};
+
+// Share product
+const shareProduct=(p,condoNome)=>{
+  const url=window.location.href;
+  const txt=`🏡 *${p.nome}* por ${M}${p.preco}\n${p.descricao||""}\n\n📍 ${condoNome} — Troca Já\n👉 ${url}`;
+  if(navigator.share){navigator.share({title:p.nome,text:txt,url}).catch(()=>{})}
+  else{const wa=`https://wa.me/?text=${encodeURIComponent(txt)}`;window.open(wa,"_blank")}
+};
+
 // ── Atoms ────────────────────────────────────────────────────────────────────
 const Av=({u,size=32,onClick})=>u?.foto
   ?<img src={u.foto} alt="" onClick={onClick} style={{width:size,height:size,borderRadius:"50%",objectFit:"cover",flexShrink:0,cursor:onClick?"pointer":"default"}}/>
@@ -151,7 +175,7 @@ function App(){
   const [lightbox,setLightbox]=useState(null);
   const [regStep,setRegStep]=useState(1);
   const [regType,setRegType]=useState("morador");
-  const [reg,setReg]=useState({nome:"",email:"",cpf:"",tel:"",bio:"",foto:null,condoId:"",novoCondominio:false,condoNova:"",cidadeNova:"",estadoNova:"",cardNum:"",cardNome:"",cardVal:"",cardCvv:"",showCvv:false,pixTipo:"cpf",pixChave:"",pixBanco:""});
+  const [reg,setReg]=useState({nome:"",email:"",cpf:"",tel:"",bio:"",foto:null,unidade:"",condoId:"",novoCondominio:false,condoNova:"",cidadeNova:"",estadoNova:"",cardNum:"",cardNome:"",cardVal:"",cardCvv:"",showCvv:false,pixTipo:"cpf",pixChave:"",pixBanco:"",lgpd_pub:false,lgpd_contato:false,lgpd_dados:false});
   const msgsEnd=useRef(null);
 
   useEffect(()=>{
@@ -209,22 +233,44 @@ function App(){
   const updateUser=async(id,patch)=>{setUsers(prev=>prev.map(u=>u.id===id?{...u,...patch}:u));await db.update("usuarios",`id=eq.${id}`,patch)};
   const addNotif=async(userId,tipo,texto,icon="🔔")=>{const n={id:uid_gen(),user_id:userId,tipo,texto,icon,lido:false};setNotifs(prev=>[n,...prev]);await db.insert("notificacoes",n)};
   const addXP=async(userId,xp,badgeId=null)=>{const u=users.find(x=>x.id===userId);if(!u)return;const newXp=(u.xp||0)+xp;const newBadges=badgeId&&!(u.badges||[]).includes(badgeId)?[...(u.badges||[]),badgeId]:(u.badges||[]);await updateUser(userId,{xp:newXp,badges:newBadges})};
-  const login=id=>{setUid(id);setScreen("app");setAba("condo");setModal(null)};
+  const login=id=>{
+    const u=users.find(x=>x.id===id);
+    if(u?.status_conta==="pendente"){showToast("Cadastro aguardando aprovação do administrador","err");return}
+    if(u?.status_conta==="rejeitado"){showToast("Cadastro recusado. Entre em contato com o administrador","err");return}
+    setUid(id);setScreen("app");setAba("condo");setModal(null)
+  };
 
   const comprar=async(p)=>{
-    const taxa=Math.round(p.preco*TAXA),total=p.preco+taxa;
-    if(meDisp<total){showToast("Limite insuficiente!","err");setModal(null);return}
-    const novoSaldo=(me.saldo||0)-total;
+    const nacional=p.condo_id!==me.condo_id;
+    const {total,franqueadora,franqueado_comprador,franqueado_vendedor}=calcTaxas(p.preco,nacional);
+    if(meDisp<p.preco+total){showToast("Limite insuficiente!","err");setModal(null);return}
+    const novoSaldo=(me.saldo||0)-(p.preco+total);
     const vendedor=users.find(u=>u.id===p.vendedor_id);
-    setUsers(prev=>prev.map(u=>{if(u.id===uid)return{...u,saldo:novoSaldo};if(u.id===p.vendedor_id)return{...u,saldo:(u.saldo||0)+p.preco};return u}));
+    // Franqueados
+    const franqComprador=users.find(u=>u.condo_id===me.condo_id&&u.role==="franqueado");
+    const franqVendedor=users.find(u=>u.condo_id===p.condo_id&&u.role==="franqueado");
+    setUsers(prev=>prev.map(u=>{
+      if(u.id===uid)return{...u,saldo:novoSaldo};
+      if(u.id===p.vendedor_id)return{...u,saldo:(u.saldo||0)+p.preco};
+      return u;
+    }));
     setProds(prev=>prev.map(x=>x.id===p.id?{...x,status:"vendido"}:x));
-    const novaT={id:uid_gen(),prod_id:p.id,prod_nome:p.nome,prod_emoji:p.emoji,comprador_id:uid,vendedor_id:p.vendedor_id,condo_id:p.condo_id,valor:p.preco,taxa,nacional:p.condo_id!==me.condo_id,avaliacao:null};
+    const novaT={id:uid_gen(),prod_id:p.id,prod_nome:p.nome,prod_emoji:p.emoji,
+      comprador_id:uid,vendedor_id:p.vendedor_id,condo_id:p.condo_id,
+      valor:p.preco,taxa:total,taxa_franqueadora:franqueadora,
+      taxa_franqueado_comprador:franqueado_comprador,taxa_franqueado_vendedor:franqueado_vendedor,
+      nacional,avaliacao:null};
     setTrans(prev=>[novaT,...prev]);
-    await Promise.all([db.update("usuarios",`id=eq.${uid}`,{saldo:novoSaldo}),db.update("usuarios",`id=eq.${p.vendedor_id}`,{saldo:(vendedor?.saldo||0)+p.preco}),db.update("produtos",`id=eq.${p.id}`,{status:"vendido"}),db.insert("transacoes",novaT)]);
+    await Promise.all([
+      db.update("usuarios",`id=eq.${uid}`,{saldo:novoSaldo}),
+      db.update("usuarios",`id=eq.${p.vendedor_id}`,{saldo:(vendedor?.saldo||0)+p.preco}),
+      db.update("produtos",`id=eq.${p.id}`,{status:"vendido"}),
+      db.insert("transacoes",novaT),
+    ]);
     const vv=trans.filter(t=>t.vendedor_id===p.vendedor_id).length;
     await addXP(uid,10);await addXP(p.vendedor_id,50);
     if(vv===0){await addXP(p.vendedor_id,100,"primeira_venda");await addNotif(p.vendedor_id,"badge","🏆 Primeira Venda! +100 XP","🏆")}
-    if(p.condo_id!==me.condo_id)await addXP(uid,100,"nacional");
+    if(nacional)await addXP(uid,100,"nacional");
     await addNotif(p.vendedor_id,"venda",`🎉 "${p.nome}" vendido! +${M}${p.preco}`,"🎉");
     setModal({tipo:"avaliar",transId:novaT.id,vendedorId:p.vendedor_id,prodNome:p.nome});
   };
@@ -291,16 +337,34 @@ function App(){
     }
     const cartao=reg.cardNum.replace(/\s/g,"").length>=16?{numero:reg.cardNum.replace(/\s/g,""),nome:reg.cardNome,validade:reg.cardVal}:null;
     const pix=reg.pixChave&&reg.pixBanco?{tipo:reg.pixTipo,chave:reg.pixChave,banco:reg.pixBanco}:null;
-    const nu={id:newId,nome:reg.nome,email:reg.email,cpf:reg.cpf,tel:reg.tel,bio:reg.bio,foto:reg.foto,condo_id:condoId,role:isFranq?"franqueado":"usuario",cor:["#EF4444","#3B82F6","#8B5CF6","#06B6D4","#F59E0B"][Math.floor(Math.random()*5)],saldo:0,limite:LIMITE,xp:0,badges:[],juros:0,cartao,pix};
+    // Moradores ficam pendentes até aprovação do franqueado; franqueados são aprovados automaticamente
+    const status_conta=isFranq?"aprovado":"pendente";
+    const nu={id:newId,nome:reg.nome,email:reg.email,cpf:reg.cpf,tel:reg.tel,bio:reg.bio,foto:reg.foto,
+      unidade:reg.unidade,
+      condo_id:condoId,role:isFranq?"franqueado":"usuario",
+      cor:["#EF4444","#3B82F6","#8B5CF6","#06B6D4","#F59E0B"][Math.floor(Math.random()*5)],
+      saldo:0,limite:LIMITE,xp:0,badges:[],juros:0,cartao,pix,
+      status_conta,
+      lgpd:{publicidade:reg.lgpd_pub,contato:reg.lgpd_contato,dados:reg.lgpd_dados,data:new Date().toISOString()}};
     const saved=await db.insert("usuarios",nu);
-    setUsers(prev=>[...prev,saved||nu]);
-    login(saved?.id||newId);
-    setReg({nome:"",email:"",cpf:"",tel:"",bio:"",foto:null,condoId:"",novoCondominio:false,condoNova:"",cidadeNova:"",estadoNova:"",cardNum:"",cardNome:"",cardVal:"",cardCvv:"",showCvv:false,pixTipo:"cpf",pixChave:"",pixBanco:""});
+    const savedUser=saved||nu;
+    setUsers(prev=>[...prev,savedUser]);
+    // Notificar franqueado do condo sobre novo cadastro pendente
+    if(!isFranq&&condoId){
+      const franq=users.find(u=>u.condo_id===condoId&&u.role==="franqueado");
+      if(franq)await addNotif(franq.id,"aprovacao",`👤 ${reg.nome} solicitou entrada no condomínio (unid. ${reg.unidade||"—"})`, "👤");
+    }
+    if(status_conta==="aprovado"){
+      login(savedUser.id);
+      showToast("🎉 Bem-vindo ao Troca Já!");
+    } else {
+      setModal({tipo:"aguardando_aprovacao"});
+    }
+    setReg({nome:"",email:"",cpf:"",tel:"",bio:"",foto:null,unidade:"",condoId:"",novoCondominio:false,condoNova:"",cidadeNova:"",estadoNova:"",cardNum:"",cardNome:"",cardVal:"",cardCvv:"",showCvv:false,pixTipo:"cpf",pixChave:"",pixBanco:"",lgpd_pub:false,lgpd_contato:false,lgpd_dados:false});
     setRegStep(1);
-    showToast("🎉 Bem-vindo ao Troca Já!");
   };
 
-  const regV1=reg.nome.length>2&&reg.email.includes("@")&&reg.cpf.length>=11&&reg.tel.length>=10;
+  const regV1=reg.nome.length>2&&reg.email.includes("@")&&reg.cpf.length>=11&&reg.tel.length>=10&&reg.lgpd_dados;
   const regV2=regType==="franqueado"?(reg.condoNova.length>2&&reg.cidadeNova.length>2&&reg.estadoNova.length===2):(!!reg.condoId&&condos.length>0);
   const regV3=reg.cardNum.replace(/\s/g,"").length>=16&&reg.cardNome.length>2&&reg.cardVal.length>=5&&reg.cardCvv.length>=3;
 
@@ -359,6 +423,7 @@ function App(){
             <div><div className="playfair" style={{fontSize:20,color:"#fbbf24",fontWeight:700,lineHeight:1}}>{M}{p.preco}</div><div style={{fontSize:10,color:"rgba(255,255,255,.28)"}}>+{taxa} taxa</div></div>
             <div style={{display:"flex",gap:6}}>
               <button className="btn ghost" style={{fontSize:11,padding:"6px 10px"}} onClick={()=>abrirChat(p)}>💬</button>
+              <button className="btn ghost" style={{fontSize:11,padding:"6px 10px"}} title="Compartilhar" onClick={()=>shareProduct(p,condo?.nome||"")}>🔗</button>
               <button className="btn gold" style={{fontSize:11,padding:"6px 12px"}} disabled={!ok} onClick={()=>ok&&setModal({tipo:"compra",p})}>{ok?"Comprar":"Sem limite"}</button>
             </div>
           </div>
@@ -488,8 +553,25 @@ function App(){
                   <Fld label="Nome *" full><input className="inp" value={reg.nome} onChange={e=>setReg(r=>({...r,nome:e.target.value}))} placeholder="Seu nome"/></Fld>
                   <Fld label="E-mail *"><input className="inp" value={reg.email} onChange={e=>setReg(r=>({...r,email:e.target.value}))} placeholder="seu@email.com"/></Fld>
                   <Fld label="CPF *"><input className="inp" value={reg.cpf} onChange={e=>setReg(r=>({...r,cpf:fmtCPF(e.target.value)}))} placeholder="000.000.000-00"/></Fld>
-                  <Fld label="Telefone *" full><input className="inp" value={reg.tel} onChange={e=>setReg(r=>({...r,tel:fmtTel(e.target.value)}))} placeholder="(11)99999-0000"/></Fld>
+                  <Fld label="Telefone *"><input className="inp" value={reg.tel} onChange={e=>setReg(r=>({...r,tel:fmtTel(e.target.value)}))} placeholder="(11)99999-0000"/></Fld>
+                  {regType==="morador"&&<Fld label="Nº da Unidade/Apto *"><input className="inp" value={reg.unidade} onChange={e=>setReg(r=>({...r,unidade:e.target.value}))} placeholder="Ex: 42B, Torre A Apto 15"/></Fld>}
                   <Fld label="Bio (opcional)" full><textarea className="inp" rows={2} value={reg.bio} onChange={e=>setReg(r=>({...r,bio:e.target.value}))} placeholder="Fale sobre você..."/></Fld>
+                </div>
+                {/* LGPD */}
+                <div style={{marginTop:16,background:"rgba(59,130,246,.06)",border:"1px solid rgba(59,130,246,.2)",borderRadius:14,padding:16}}>
+                  <div style={{fontWeight:700,fontSize:13,marginBottom:4,color:"#93c5fd"}}>🔒 Privacidade e Consentimento (LGPD)</div>
+                  <div style={{fontSize:11,color:"rgba(255,255,255,.45)",marginBottom:14,lineHeight:1.7}}>De acordo com a Lei Geral de Proteção de Dados (Lei nº 13.709/2018), precisamos do seu consentimento para utilizar seus dados. Você pode revogar qualquer consentimento a qualquer momento em seu perfil.</div>
+                  {[
+                    {key:"lgpd_dados",label:"✅ Autorizo o uso dos meus dados pessoais para operação da plataforma Troca Já (obrigatório)",required:true},
+                    {key:"lgpd_contato",label:"📱 Autorizo receber comunicações sobre transações, novidades e avisos importantes por e-mail e WhatsApp",required:false},
+                    {key:"lgpd_pub",label:"📢 Autorizo o uso dos meus dados para campanhas de publicidade e ofertas personalizadas da plataforma",required:false},
+                  ].map(item=>(
+                    <label key={item.key} style={{display:"flex",gap:10,alignItems:"flex-start",marginBottom:10,cursor:"pointer"}}>
+                      <input type="checkbox" checked={reg[item.key]||false} onChange={e=>setReg(r=>({...r,[item.key]:e.target.checked}))} style={{marginTop:2,width:16,height:16,flexShrink:0,accentColor:"#fbbf24"}}/>
+                      <span style={{fontSize:12,color:item.required?"rgba(255,255,255,.8)":"rgba(255,255,255,.55)",lineHeight:1.5}}>{item.label}{item.required&&<span style={{color:"#f87171"}}> *</span>}</span>
+                    </label>
+                  ))}
+                  {!reg.lgpd_dados&&<div style={{fontSize:11,color:"#f87171",marginTop:4}}>⚠️ O consentimento obrigatório é necessário para se cadastrar.</div>}
                 </div>
               </div>
             )}
@@ -575,30 +657,290 @@ function App(){
 
   // ── Franqueadora ─────────────────────────────────────────────────────────────
   if(screen==="franqueadora"){
-    const fData=condos.map(c=>{const ct=trans.filter(t=>t.condo_id===c.id);const fat=ct.reduce((a,t)=>a+t.taxa,0);return{nome:c.nome.split(" ")[0],cor:c.cor,faturamento:fat,royalties:parseFloat((fat*.15).toFixed(2)),transacoes:ct.length,moradores:users.filter(u=>u.condo_id===c.id).length}});
+    const fData=condos.map(c=>{const ct=trans.filter(t=>t.condo_id===c.id);const fat=ct.reduce((a,t)=>a+t.taxa,0);const franq=users.find(u=>u.condo_id===c.id&&u.role==="franqueado");return{...c,fat,royalties:parseFloat((fat*.15).toFixed(2)),transacoes:ct.length,moradores:users.filter(u=>u.condo_id===c.id).length,franqueado:franq}});
+    const [fqSub,setFqSub]=useState("dashboard");
+    const [novoCondo,setNovoCondo]=useState({nome:"",cidade:"",estado:""});
+    const [condoSel,setCondoSel]=useState(null); // condo selected for management
+    const [ajLimFranq,setAjLimFranq]=useState(null); // {userId, atual}
+    const [ajLimVal,setAjLimVal]=useState("");
+
+    const criarCondo=async()=>{
+      if(!novoCondo.nome||!novoCondo.cidade||!novoCondo.estado)return;
+      const nc={id:uid_gen(),nome:novoCondo.nome,cidade:novoCondo.cidade,estado:novoCondo.estado,cor:["#F97316","#A855F7","#10B981","#3B82F6","#EC4899"][Math.floor(Math.random()*5)]};
+      const saved=await db.insert("condos",nc);
+      setCondos(prev=>[...prev,saved||nc]);
+      setNovoCondo({nome:"",cidade:"",estado:""});
+      showToast("🏢 Condomínio criado!");
+    };
+
+    const ajustarLimiteFranq=async(userId,novoLimite)=>{
+      await updateUser(userId,{limite:novoLimite});
+      await addNotif(userId,"limite",`🏦 Seu limite foi ajustado para ${M}${novoLimite} pela Franqueadora`,"🏦");
+      setAjLimFranq(null);
+      showToast(`Limite → ${M}${novoLimite}`);
+    };
+
+    const cancelarCredito=async(userId)=>{
+      if(!window.confirm("Zerar o saldo deste usuário?"))return;
+      await updateUser(userId,{saldo:0});
+      await addNotif(userId,"sistema","⚠️ Seu saldo foi zerado pela Franqueadora","⚠️");
+      showToast("Saldo zerado!");
+    };
+
     return(
       <div style={{minHeight:"100vh",background:"#0d0d14",color:"#f0ede8"}}>
-        <div style={{maxWidth:820,margin:"0 auto",padding:"0 14px 60px"}}>
+        <div style={{maxWidth:860,margin:"0 auto",padding:"0 14px 60px"}}>
           <div style={{padding:"18px 0 14px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-            <div><div style={{fontSize:9,letterSpacing:4,color:"rgba(251,191,36,.5)",fontWeight:700,textTransform:"uppercase"}}>acesso restrito</div><h1 className="playfair" style={{fontSize:24,fontWeight:900,color:"#fbbf24"}}>Franqueadora</h1></div>
+            <div>
+              <div style={{fontSize:9,letterSpacing:4,color:"rgba(251,191,36,.5)",fontWeight:700,textTransform:"uppercase"}}>acesso total</div>
+              <h1 className="playfair" style={{fontSize:24,fontWeight:900,color:"#fbbf24"}}>🏢 Franqueadora</h1>
+            </div>
             <button className="btn ghost" style={{fontSize:11}} onClick={()=>{setScreen("landing");setFqPass("")}}>← Sair</button>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:18}}>
-            <StatCard icon="🏢" label="Condomínios" value={condos.length}/>
-            <StatCard icon="👥" label="Usuários" value={users.length} cor="#86efac"/>
-            <StatCard icon="💰" label="Faturamento" value={`R$${trans.reduce((a,t)=>a+t.taxa,0).toFixed(0)}`} cor="#93c5fd"/>
-            <StatCard icon="⭐" label="Royalties (15%)" value={`R$${(trans.reduce((a,t)=>a+t.taxa,0)*.15).toFixed(0)}`} cor="#f0a5ca"/>
-          </div>
-          <div className="card" style={{padding:18}}>
-            {fData.sort((a,b)=>b.faturamento-a.faturamento).map((c,i)=>(
-              <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:i<fData.length-1?"1px solid rgba(255,255,255,.05)":"none"}}>
-                <span className="playfair" style={{fontSize:18,color:"rgba(251,191,36,.4)",minWidth:24,fontWeight:700}}>{i+1}</span>
-                <div style={{flex:1}}><div style={{fontWeight:600,fontSize:14}}>{c.nome}</div><div style={{fontSize:11,color:"rgba(255,255,255,.35)"}}>{c.moradores} moradores · {c.transacoes} vendas</div></div>
-                <div style={{textAlign:"right"}}><div className="playfair" style={{fontSize:16,color:"#fbbf24",fontWeight:700}}>R${c.faturamento.toFixed(0)}</div><div style={{fontSize:10,color:"rgba(255,255,255,.3)"}}>roy: R${c.royalties.toFixed(0)}</div></div>
-              </div>
+
+          {/* Sub tabs */}
+          <div style={{display:"flex",gap:3,marginBottom:18,background:"rgba(255,255,255,.03)",borderRadius:12,padding:4,border:"1px solid rgba(255,255,255,.06)",overflowX:"auto"}}>
+            {[["dashboard","📊 Dashboard"],["condominios","🏢 Condomínios"],["franqueados","⭐ Franqueados"],["moradores","👥 Moradores"],["novo_condo","➕ Novo Condo"]].map(([id,lb])=>(
+              <button key={id} className={`tab${fqSub===id?" on":""}`} style={{flex:1,justifyContent:"center"}} onClick={()=>setFqSub(id)}>{lb}</button>
             ))}
           </div>
+
+          {/* DASHBOARD */}
+          {fqSub==="dashboard"&&(
+            <div style={{display:"grid",gap:14}}>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10}}>
+                <StatCard icon="🏢" label="Condomínios" value={condos.length} sub={`${users.filter(u=>u.role==="franqueado").length} franqueados`}/>
+                <StatCard icon="👥" label="Moradores" value={users.filter(u=>u.role==="usuario").length} sub={`${users.length} total`} cor="#86efac"/>
+                <StatCard icon="💰" label="Faturamento Rede" value={`R$${trans.reduce((a,t)=>a+t.taxa,0).toFixed(0)}`} sub="5% por transação" cor="#93c5fd"/>
+                <StatCard icon="⭐" label="Royalties Franqueadora (3%)" value={`R$${trans.reduce((a,t)=>a+(t.taxa_franqueadora||Math.round((t.valor||0)*0.03)),0).toFixed(0)}`} sub="3% de cada transação" cor="#f0a5ca"/>
+              </div>
+              <div className="card" style={{padding:18}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                  <div style={{fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,textTransform:"uppercase"}}>Ranking de condomínios</div>
+                  <button className="btn ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>{
+                    const rows=fData.map(c=>({Condominio:c.nome,Cidade:c.cidade||"",Estado:c.estado||"","Faturamento R$":c.fat.toFixed(2),"Royalties R$":c.royalties.toFixed(2),Transacoes:c.transacoes,Moradores:c.moradores,Franqueado:c.franqueado?.nome||""}));
+                    exportCSV(rows,"relatorio_rede_troca_ja.csv");
+                  }}>📥 Exportar CSV</button>
+                </div>
+                {fData.sort((a,b)=>b.fat-a.fat).map((c,i)=>(
+                  <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:i<fData.length-1?"1px solid rgba(255,255,255,.05)":"none",cursor:"pointer"}} onClick={()=>{setCondoSel(c.id);setFqSub("condominios")}}>
+                    <span className="playfair" style={{fontSize:18,color:"rgba(251,191,36,.4)",minWidth:24,fontWeight:700}}>{i+1}</span>
+                    <div style={{width:10,height:10,borderRadius:"50%",background:c.cor,flexShrink:0}}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:600,fontSize:14}}>{c.nome}</div>
+                      <div style={{fontSize:11,color:"rgba(255,255,255,.35)"}}>{c.moradores} moradores · {c.transacoes} vendas · {c.cidade}/{c.estado}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div className="playfair" style={{fontSize:16,color:"#fbbf24",fontWeight:700}}>R${c.fat.toFixed(0)}</div>
+                      <div style={{fontSize:10,color:"rgba(255,255,255,.3)"}}>roy: R${c.royalties.toFixed(0)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {/* Inadimplentes */}
+              {users.filter(u=>u.saldo<0).length>0&&(
+                <div className="card" style={{padding:18}}>
+                  <div style={{fontSize:11,color:"rgba(239,68,68,.7)",letterSpacing:1,textTransform:"uppercase",marginBottom:12}}>⚠️ Usuários com limite em uso ({users.filter(u=>u.saldo<0).length})</div>
+                  {users.filter(u=>u.saldo<0).map(u=>{
+                    const c=condos.find(x=>x.id===u.condo_id);
+                    return(
+                      <div key={u.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid rgba(255,255,255,.05)"}}>
+                        <Av u={u} size={30}/>
+                        <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600}}>{u.nome}</div><div style={{fontSize:11,color:"rgba(255,255,255,.35)"}}>🏢 {c?.nome}</div></div>
+                        <Pill fg="#f87171" bg="rgba(239,68,68,.1)">{M}{Math.abs(u.saldo).toFixed(0)} negativo</Pill>
+                        <button className="btn danger" style={{fontSize:10,padding:"4px 10px"}} onClick={()=>cancelarCredito(u.id)}>Zerar</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* CONDOMÍNIOS */}
+          {fqSub==="condominios"&&(
+            <div style={{display:"grid",gap:12}}>
+              {fData.map(c=>{
+                const isOpen=condoSel===c.id;
+                const condoUsers=users.filter(u=>u.condo_id===c.id);
+                return(
+                  <div key={c.id} className="card" style={{overflow:"hidden"}}>
+                    <div style={{padding:16,display:"flex",alignItems:"center",gap:10,cursor:"pointer"}} onClick={()=>setCondoSel(isOpen?null:c.id)}>
+                      <div style={{width:12,height:12,borderRadius:"50%",background:c.cor,flexShrink:0}}/>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:700,fontSize:15}}>{c.nome}</div>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,.38)"}}>{c.cidade}/{c.estado} · {c.moradores} moradores · {c.transacoes} transações</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div className="playfair" style={{fontSize:16,color:"#fbbf24",fontWeight:700}}>R${c.fat.toFixed(0)}</div>
+                        <div style={{fontSize:10,color:"rgba(255,255,255,.3)"}}>roy: R${c.royalties.toFixed(0)}</div>
+                      </div>
+                      <span style={{fontSize:12,color:"rgba(255,255,255,.4)",marginLeft:4}}>{isOpen?"▲":"▼"}</span>
+                    </div>
+                    {isOpen&&(
+                      <div style={{borderTop:"1px solid rgba(255,255,255,.07)",padding:16}}>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,textTransform:"uppercase",marginBottom:12}}>Usuários deste condomínio</div>
+                        {condoUsers.map(u=>{
+                          const nv=getNivel(u.xp||0);
+                          return(
+                            <div key={u.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:"1px solid rgba(255,255,255,.05)"}}>
+                              <Av u={u} size={34}/>
+                              <div style={{flex:1}}>
+                                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                                  <span style={{fontWeight:600,fontSize:13}}>{u.nome}</span>
+                                  {u.role==="franqueado"&&<Pill fg="#92400e" bg="rgba(251,191,36,.12)">Franqueado</Pill>}
+                                  <span style={{fontSize:12}}>{nv.icon}</span>
+                                </div>
+                                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                                  <Pill fg={u.saldo<0?"#f87171":"#86efac"} bg={u.saldo<0?"rgba(239,68,68,.1)":"rgba(16,185,129,.1)"}>{M}{(u.saldo||0).toFixed(0)}</Pill>
+                                  <Pill fg="rgba(251,191,36,.7)" bg="rgba(251,191,36,.08)">lim: {M}{u.limite||LIMITE}</Pill>
+                                </div>
+                              </div>
+                              <div style={{display:"flex",gap:5}}>
+                                <button className="btn ghost" style={{fontSize:10,padding:"5px 9px"}} onClick={()=>{setAjLimFranq({userId:u.id,atual:u.limite||LIMITE,nome:u.nome});setAjLimVal(String(u.limite||LIMITE))}}>✏️ Limite</button>
+                                {u.saldo<0&&<button className="btn danger" style={{fontSize:10,padding:"5px 9px"}} onClick={()=>cancelarCredito(u.id)}>🚫 Zerar</button>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* FRANQUEADOS */}
+          {fqSub==="franqueados"&&(
+            <div style={{display:"grid",gap:10}}>
+              {users.filter(u=>u.role==="franqueado").map(u=>{
+                const c=condos.find(x=>x.id===u.condo_id);
+                const ct=trans.filter(t=>t.condo_id===u.condo_id);
+                const fat=ct.reduce((a,t)=>a+t.taxa,0);
+                const nv=getNivel(u.xp||0);
+                return(
+                  <div key={u.id} className="card" style={{padding:16}}>
+                    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+                      <Av u={u} size={44}/>
+                      <div style={{flex:1}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}><span style={{fontWeight:700,fontSize:15}}>{u.nome}</span><span>{nv.icon}</span></div>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,.38)"}}>{u.email} · 🏢 {c?.nome}/{c?.estado}</div>
+                        {u.bio&&<div style={{fontSize:11,color:"rgba(255,255,255,.3)",fontStyle:"italic",marginTop:3}}>"{u.bio}"</div>}
+                      </div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
+                      {[{l:"Moradores",v:users.filter(x=>x.condo_id===u.condo_id).length},{l:"Transações",v:ct.length},{l:"Faturamento",v:`R$${fat.toFixed(0)}`}].map((s,i)=>(
+                        <div key={i} style={{background:"rgba(255,255,255,.04)",borderRadius:10,padding:"8px 10px",textAlign:"center"}}>
+                          <div style={{fontSize:10,color:"rgba(255,255,255,.3)",marginBottom:2}}>{s.l}</div>
+                          <div style={{fontSize:14,fontWeight:700,color:"#fbbf24"}}>{s.v}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                      <Pill fg={u.saldo<0?"#f87171":"#86efac"} bg={u.saldo<0?"rgba(239,68,68,.1)":"rgba(16,185,129,.1)"}>{M}{(u.saldo||0).toFixed(0)} saldo</Pill>
+                      <Pill fg="rgba(251,191,36,.7)" bg="rgba(251,191,36,.1)">Limite: {M}{u.limite||LIMITE}</Pill>
+                      <div style={{flex:1}}/>
+                      <button className="btn ghost" style={{fontSize:11,padding:"6px 12px"}} onClick={()=>{setAjLimFranq({userId:u.id,atual:u.limite||LIMITE,nome:u.nome});setAjLimVal(String(u.limite||LIMITE))}}>✏️ Ajustar Limite</button>
+                      {u.saldo<0&&<button className="btn danger" style={{fontSize:11,padding:"6px 12px"}} onClick={()=>cancelarCredito(u.id)}>🚫 Zerar Saldo</button>}
+                      <button className="btn ghost" style={{fontSize:11,padding:"6px 12px"}} onClick={async()=>{const j=parseFloat((Math.abs(u.saldo)*JUROS).toFixed(2));if(u.saldo>=0){showToast("Sem saldo negativo","err");return}await updateUser(u.id,{saldo:parseFloat((u.saldo-j).toFixed(2))});showToast(`Juros ${M}${j} aplicados`)}}>⚡ Aplicar Juros</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* TODOS OS MORADORES */}
+          {fqSub==="moradores"&&(
+            <div style={{display:"grid",gap:10}}>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:4}}>
+                <StatCard icon="👥" label="Total" value={users.filter(u=>u.role==="usuario").length}/>
+                <StatCard icon="⚠️" label="Em débito" value={users.filter(u=>u.saldo<0).length} cor="#f87171"/>
+                <StatCard icon="📦" label="Itens ativos" value={prods.filter(p=>p.status==="disponivel").length} cor="#86efac"/>
+              </div>
+              {users.filter(u=>u.role==="usuario").map(u=>{
+                const c=condos.find(x=>x.id===u.condo_id);
+                const nv=getNivel(u.xp||0);
+                return(
+                  <div key={u.id} className="card" style={{padding:14}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <Av u={u} size={36}/>
+                      <div style={{flex:1}}>
+                        <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:2}}><span style={{fontWeight:600,fontSize:13}}>{u.nome}</span><span style={{fontSize:12}}>{nv.icon}</span></div>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,.35)",marginBottom:4}}>🏢 {c?.nome} · {u.xp||0}xp</div>
+                        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                          <Pill fg={u.saldo<0?"#f87171":"#86efac"} bg={u.saldo<0?"rgba(239,68,68,.1)":"rgba(16,185,129,.1)"}>{M}{(u.saldo||0).toFixed(0)}</Pill>
+                          <Pill fg="rgba(251,191,36,.7)" bg="rgba(251,191,36,.08)">lim: {M}{u.limite||LIMITE}</Pill>
+                        </div>
+                      </div>
+                      <div style={{display:"flex",gap:5}}>
+                        <button className="btn ghost" style={{fontSize:10,padding:"5px 9px"}} onClick={()=>{setAjLimFranq({userId:u.id,atual:u.limite||LIMITE,nome:u.nome});setAjLimVal(String(u.limite||LIMITE))}}>✏️</button>
+                        {u.saldo<0&&<button className="btn danger" style={{fontSize:10,padding:"5px 9px"}} onClick={()=>cancelarCredito(u.id)}>🚫</button>}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* NOVO CONDOMÍNIO */}
+          {fqSub==="novo_condo"&&(
+            <div style={{display:"grid",gap:14}}>
+              <div style={{background:"rgba(251,191,36,.05)",border:"1px solid rgba(251,191,36,.15)",borderRadius:16,padding:20}}>
+                <div style={{fontWeight:700,fontSize:15,marginBottom:6}}>➕ Cadastrar Novo Condomínio</div>
+                <div style={{fontSize:12,color:"rgba(255,255,255,.45)",marginBottom:20,lineHeight:1.7}}>Após criar o condomínio, você pode indicar um Franqueado responsável ou o próprio morador pode se cadastrar como Franqueado selecionando este condomínio.</div>
+                <div className="g2">
+                  <Fld label="Nome do condomínio *" full><input className="inp" placeholder="Ex: Residencial das Flores" value={novoCondo.nome} onChange={e=>setNovoCondo(n=>({...n,nome:e.target.value}))}/></Fld>
+                  <Fld label="Cidade *"><input className="inp" placeholder="São Paulo" value={novoCondo.cidade} onChange={e=>setNovoCondo(n=>({...n,cidade:e.target.value}))}/></Fld>
+                  <Fld label="Estado (UF) *"><input className="inp" placeholder="SP" maxLength={2} value={novoCondo.estado} onChange={e=>setNovoCondo(n=>({...n,estado:e.target.value.toUpperCase()}))}/></Fld>
+                </div>
+                <button className="btn gold" style={{marginTop:16,width:"100%",padding:"12px"}} disabled={!novoCondo.nome||!novoCondo.cidade||novoCondo.estado.length!==2} onClick={criarCondo}>🏢 Criar Condomínio</button>
+              </div>
+              {condos.length>0&&(
+                <div className="card" style={{padding:16}}>
+                  <div style={{fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,textTransform:"uppercase",marginBottom:12}}>Condomínios cadastrados ({condos.length})</div>
+                  {condos.map((c,i)=>{
+                    const franq=users.find(u=>u.condo_id===c.id&&u.role==="franqueado");
+                    return(
+                      <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<condos.length-1?"1px solid rgba(255,255,255,.05)":"none"}}>
+                        <div style={{width:10,height:10,borderRadius:"50%",background:c.cor,flexShrink:0}}/>
+                        <div style={{flex:1}}>
+                          <div style={{fontWeight:600,fontSize:13}}>{c.nome}</div>
+                          <div style={{fontSize:11,color:"rgba(255,255,255,.35)"}}>{c.cidade}/{c.estado} · {franq?`Franqueado: ${franq.nome}`:"Sem franqueado ainda"}</div>
+                        </div>
+                        <Pill fg="rgba(255,255,255,.5)">{users.filter(u=>u.condo_id===c.id).length} membros</Pill>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
+
+        {/* Modal ajustar limite */}
+        {ajLimFranq&&(
+          <div className="ov" onClick={()=>setAjLimFranq(null)}>
+            <div className="mb" style={{maxWidth:360}} onClick={e=>e.stopPropagation()}>
+              <h3 className="playfair" style={{fontSize:18,marginBottom:5}}>Ajustar Limite de Crédito</h3>
+              <div style={{fontSize:12,color:"rgba(255,255,255,.38)",marginBottom:14}}>{ajLimFranq.nome} · atual: {M}{ajLimFranq.atual}</div>
+              <input className="inp" type="number" value={ajLimVal} onChange={e=>setAjLimVal(e.target.value)} style={{marginBottom:10}}/>
+              <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+                {[50,100,200,300,500,1000,2000].map(v=><button key={v} className="btn ghost" style={{fontSize:11,padding:"5px 10px",background:ajLimVal==v?"rgba(251,191,36,.14)":undefined}} onClick={()=>setAjLimVal(String(v))}>{M}{v}</button>)}
+              </div>
+              <div style={{background:"rgba(251,191,36,.05)",border:"1px solid rgba(251,191,36,.1)",borderRadius:10,padding:10,marginBottom:14,fontSize:11,color:"rgba(251,191,36,.7)",lineHeight:1.6}}>
+                💡 O usuário receberá uma notificação sobre o ajuste do limite.
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button className="btn ghost" style={{flex:1}} onClick={()=>setAjLimFranq(null)}>Cancelar</button>
+                <button className="btn gold" style={{flex:2}} disabled={!parseInt(ajLimVal)||parseInt(ajLimVal)<0} onClick={()=>ajustarLimiteFranq(ajLimFranq.userId,parseInt(ajLimVal))}>Salvar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {toast&&<div className="toast" style={{background:toast.tipo==="err"?"#ef4444":"#22c55e",color:"#fff"}}>{toast.msg}</div>}
       </div>
     );
@@ -837,23 +1179,83 @@ function App(){
           {adminSub==="dash"&&(()=>{
             const ct=trans.filter(t=>t.condo_id===me.condo_id);
             const fat=ct.reduce((a,t)=>a+t.taxa,0);
+            const royalties=ct.reduce((a,t)=>a+(t.taxa_franqueado_comprador||0)+(t.taxa_franqueado_vendedor||0),0);
+            const pendentes=users.filter(u=>u.condo_id===me.condo_id&&u.status_conta==="pendente").length;
             return(<div style={{display:"grid",gap:12}}>
+              {pendentes>0&&<div style={{background:"rgba(251,191,36,.08)",border:"1px solid rgba(251,191,36,.3)",borderRadius:12,padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer"}} onClick={()=>setAdminSub("usuarios")}>
+                <span style={{fontSize:13,fontWeight:600,color:"#fbbf24"}}>⏳ {pendentes} cadastro{pendentes>1?"s":""} aguardando sua aprovação</span>
+                <span style={{fontSize:12,color:"rgba(251,191,36,.7)"}}>Ver →</span>
+              </div>}
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                <StatCard icon="💰" label="Faturamento" value={`R$${fat.toFixed(2)}`}/>
-                <StatCard icon="⭐" label="Royalties 15%" value={`R$${(fat*.15).toFixed(2)}`} cor="#86efac"/>
-                <StatCard icon="🔄" label="Transações" value={ct.length} cor="#93c5fd"/>
-                <StatCard icon="👥" label="Moradores" value={users.filter(u=>u.condo_id===me.condo_id).length} cor="#f0a5ca"/>
+                <StatCard icon="💰" label="Faturamento (Taxas)" value={`R$${fat.toFixed(2)}`} sub="5% por transação"/>
+                <StatCard icon="⭐" label="Seus Royalties (2%)" value={`R$${royalties.toFixed(2)}`} cor="#86efac" sub="cobrado no cartão dos moradores"/>
+                <StatCard icon="🔄" label="Transações" value={ct.length} sub={`${ct.filter(t=>t.nacional).length} nacionais`} cor="#93c5fd"/>
+                <StatCard icon="👥" label="Moradores" value={users.filter(u=>u.condo_id===me.condo_id&&u.status_conta==="aprovado").length} sub={`${pendentes} pendentes`} cor="#f0a5ca"/>
+              </div>
+              <div className="card" style={{padding:16}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+                  <div style={{fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,textTransform:"uppercase"}}>Últimas transações</div>
+                  <button className="btn ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>{
+                    const rows=ct.map(t=>{const comp=users.find(u=>u.id===t.comprador_id),vend=users.find(u=>u.id===t.vendedor_id);return{Data:t.created_at?new Date(t.created_at).toLocaleDateString("pt-BR"):"",Produto:t.prod_nome||"",Comprador:comp?.nome||"",Vendedor:vend?.nome||"",Valor:t.valor||0,"Taxa Total":t.taxa||0,"Royalties Condo":((t.taxa_franqueado_comprador||0)+(t.taxa_franqueado_vendedor||0)).toFixed(2),Nacional:t.nacional?"Sim":"Não"}});
+                    exportCSV(rows,`transacoes_${myCondo?.nome?.replace(/ /g,"_")}.csv`);
+                  }}>📥 Exportar CSV</button>
+                </div>
+                {ct.slice(0,5).map((t,i)=>{
+                  const comp=users.find(u=>u.id===t.comprador_id),vend=users.find(u=>u.id===t.vendedor_id);
+                  const roy=(t.taxa_franqueado_comprador||0)+(t.taxa_franqueado_vendedor||0);
+                  return(<div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<4?"1px solid rgba(255,255,255,.05)":"none"}}>
+                    <span style={{fontSize:20,flexShrink:0}}>{t.prod_emoji||"📦"}</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.prod_nome}</div>
+                      <div style={{fontSize:10,color:"rgba(255,255,255,.38)"}}>{comp?.nome?.split(" ")[0]} → {vend?.nome?.split(" ")[0]}{t.nacional&&" 🌐"}</div>
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0}}>
+                      <div style={{fontSize:12,fontWeight:700,color:"#fbbf24"}}>{M}{t.valor}</div>
+                      <div style={{fontSize:10,color:"rgba(16,185,129,.7)"}}>roy: R${roy.toFixed(0)}</div>
+                    </div>
+                  </div>);
+                })}
+                {ct.length===0&&<div style={{textAlign:"center",color:"rgba(255,255,255,.25)",fontSize:12,padding:"20px 0"}}>Nenhuma transação ainda</div>}
               </div>
             </div>);
           })()}
           {adminSub==="usuarios"&&(<div style={{display:"grid",gap:10}}>
-            {users.filter(u=>u.condo_id===me.condo_id&&u.id!==uid).map(usr=>{
+            {/* Pendentes de aprovação */}
+            {users.filter(u=>u.condo_id===me.condo_id&&u.status_conta==="pendente").length>0&&(
+              <div style={{background:"rgba(251,191,36,.06)",border:"1px solid rgba(251,191,36,.25)",borderRadius:14,padding:16}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#fbbf24",marginBottom:12}}>⏳ Aguardando aprovação ({users.filter(u=>u.condo_id===me.condo_id&&u.status_conta==="pendente").length})</div>
+                {users.filter(u=>u.condo_id===me.condo_id&&u.status_conta==="pendente").map(usr=>(
+                  <div key={usr.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:"1px solid rgba(255,255,255,.07)"}}>
+                    <Av u={usr} size={36}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:600,fontSize:13,marginBottom:2}}>{usr.nome}</div>
+                      <div style={{fontSize:11,color:"rgba(255,255,255,.45)"}}>📍 Unidade: {usr.unidade||"não informada"} · {usr.tel}</div>
+                      {usr.lgpd&&<div style={{fontSize:10,color:"rgba(16,185,129,.6)",marginTop:2}}>✅ LGPD aceito em {new Date(usr.lgpd.data).toLocaleDateString("pt-BR")}</div>}
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button className="btn gold" style={{fontSize:11,padding:"6px 12px"}} onClick={async()=>{await updateUser(usr.id,{status_conta:"aprovado"});await addNotif(usr.id,"aprovacao","✅ Seu cadastro foi aprovado! Bem-vindo ao Troca Já!","✅");showToast(`${usr.nome} aprovado!`)}}>✅ Aprovar</button>
+                      <button className="btn danger" style={{fontSize:11,padding:"6px 12px"}} onClick={async()=>{await updateUser(usr.id,{status_conta:"rejeitado"});await addNotif(usr.id,"aprovacao","❌ Seu cadastro foi recusado. Entre em contato com o administrador.","❌");showToast(`${usr.nome} recusado`,"err")}}>❌ Recusar</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Moradores aprovados */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+              <div style={{fontSize:12,color:"rgba(255,255,255,.45)"}}>Moradores aprovados ({users.filter(u=>u.condo_id===me.condo_id&&u.id!==uid&&u.status_conta!=="pendente").length})</div>
+              <button className="btn ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>{
+                const rows=users.filter(u=>u.condo_id===me.condo_id).map(u=>({Nome:u.nome,Email:u.email||"",CPF:u.cpf||"",Telefone:u.tel||"",Unidade:u.unidade||"",Status:u.status_conta||"aprovado",Saldo:u.saldo||0,Limite:u.limite||LIMITE,XP:u.xp||0,Cadastro:u.created_at?new Date(u.created_at).toLocaleDateString("pt-BR"):""}));
+                exportCSV(rows,`moradores_${myCondo?.nome?.replace(/ /g,"_")}.csv`);
+              }}>📥 Exportar CSV</button>
+            </div>
+            {users.filter(u=>u.condo_id===me.condo_id&&u.id!==uid&&u.status_conta!=="pendente").map(usr=>{
               const nv=getNivel(usr.xp||0);
               return(<div key={usr.id} className="card" style={{padding:14}}>
                 <div style={{display:"flex",alignItems:"center",gap:10}}>
                   <Av u={usr} size={36}/>
                   <div style={{flex:1}}>
-                    <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:2}}><span style={{fontWeight:600,fontSize:13}}>{usr.nome}</span><span>{nv.icon}</span></div>
+                    <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:2}}><span style={{fontWeight:600,fontSize:13}}>{usr.nome}</span><span>{nv.icon}</span>{usr.status_conta==="rejeitado"&&<Pill fg="#f87171" bg="rgba(239,68,68,.1)">Recusado</Pill>}</div>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.4)",marginBottom:3}}>📍 {usr.unidade||"unidade não informada"}</div>
                     <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
                       <Pill fg={usr.saldo<0?"#f87171":"#86efac"} bg={usr.saldo<0?"rgba(239,68,68,.1)":"rgba(16,185,129,.1)"}>{M}{(usr.saldo||0).toFixed(0)}</Pill>
                       <Pill fg="rgba(251,191,36,.7)" bg="rgba(251,191,36,.08)">lim:{M}{usr.limite||LIMITE}</Pill>
@@ -869,6 +1271,20 @@ function App(){
 
       {/* MODALS */}
       {lightbox&&<div className="ov" style={{zIndex:300}} onClick={()=>setLightbox(null)}>{lightbox.type==="video"?<video src={lightbox.url} controls autoPlay style={{maxWidth:"90vw",maxHeight:"90vh",borderRadius:12}}/>:<img src={lightbox.url} alt="" style={{maxWidth:"90vw",maxHeight:"90vh",objectFit:"contain",borderRadius:12}}/>}</div>}
+
+      {modal?.tipo==="aguardando_aprovacao"&&(
+        <div className="ov">
+          <div className="mb" style={{textAlign:"center",maxWidth:380}}>
+            <div style={{fontSize:52,marginBottom:16}}>⏳</div>
+            <h3 className="playfair" style={{fontSize:22,marginBottom:10}}>Cadastro enviado!</h3>
+            <div style={{fontSize:13,color:"rgba(255,255,255,.55)",lineHeight:1.8,marginBottom:20}}>
+              Seu cadastro está <strong style={{color:"#fbbf24"}}>aguardando aprovação</strong> do administrador do condomínio.<br/><br/>
+              Você será notificado assim que aprovado — normalmente em menos de 24h.
+            </div>
+            <button className="btn gold" style={{width:"100%"}} onClick={()=>setModal(null)}>Entendido</button>
+          </div>
+        </div>
+      )}
 
       {modal?.tipo==="chat"&&(()=>{
         const conv=convs.find(c=>c.id===convAtiva);if(!conv)return null;
@@ -900,14 +1316,27 @@ function App(){
       })()}
 
       {modal?.tipo==="compra"&&(()=>{
-        const p=modal.p,taxa=Math.round(p.preco*TAXA),total=p.preco+taxa,ns=(me?.saldo||0)-total;
+        const p=modal.p;
+        const nacional=p.condo_id!==me?.condo_id;
+        const {total,franqueadora,franqueado_comprador,franqueado_vendedor}=calcTaxas(p.preco,nacional);
+        const ns=(me?.saldo||0)-(p.preco+total);
         return(<div className="ov" onClick={()=>setModal(null)}>
           <div className="mb" onClick={e=>e.stopPropagation()}>
             {p.midias?.length>0?<img src={p.midias[0].url} alt="" style={{width:"100%",height:150,objectFit:"cover",borderRadius:12,marginBottom:14}}/>:<div style={{textAlign:"center",fontSize:44,marginBottom:12}}>{p.emoji}</div>}
             <h3 className="playfair" style={{fontSize:18,marginBottom:5,textAlign:"center"}}>{p.nome}</h3>
-            <div className="card" style={{padding:14,marginBottom:12}}>
-              <Row l="Preço" v={`${M}${p.preco}`}/><Row l="Taxa (5%)" v={`${M}${taxa}`}/><Row l="Total" v={`${M}${total}`} bold accent="#fbbf24"/>
-              <Row l="Saldo atual" v={`${M}${(me?.saldo||0).toFixed(2)}`}/><Row l="Saldo após" v={`${M}${ns.toFixed(2)}`} bold accent={ns<0?"#f87171":"#86efac"} last/>
+            <div className="card" style={{padding:14,marginBottom:10}}>
+              <Row l="Preço do item" v={`${M}${p.preco}`}/>
+              <Row l={`Taxa plataforma (5%)`} v={`${M}${total}`} bold accent="#fbbf24"/>
+              <div style={{background:"rgba(255,255,255,.03)",borderRadius:8,padding:"8px 10px",margin:"6px 0",fontSize:11,color:"rgba(255,255,255,.4)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span>↳ Franqueadora (3%)</span><span>R${franqueadora.toFixed(0)} cobrado no cartão</span></div>
+                {nacional
+                  ?<><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span>↳ Franqueado comprador (1%)</span><span>R${franqueado_comprador.toFixed(0)}</span></div>
+                    <div style={{display:"flex",justifyContent:"space-between"}}><span>↳ Franqueado vendedor (1%)</span><span>R${franqueado_vendedor.toFixed(0)}</span></div></>
+                  :<div style={{display:"flex",justifyContent:"space-between"}}><span>↳ Franqueado do condo (2%)</span><span>R${franqueado_comprador.toFixed(0)}</span></div>
+                }
+              </div>
+              <Row l="Saldo atual" v={`${M}${(me?.saldo||0).toFixed(2)}`}/>
+              <Row l="Saldo após compra" v={`${M}${ns.toFixed(2)}`} bold accent={ns<0?"#f87171":"#86efac"} last/>
             </div>
             {ns<0&&<div style={{background:"rgba(251,191,36,.06)",border:"1px solid rgba(251,191,36,.15)",borderRadius:10,padding:10,marginBottom:12,fontSize:12,color:"rgba(251,191,36,.8)",lineHeight:1.6}}>⚠️ Usará {M}{Math.abs(ns).toFixed(0)} do limite. Juros 3%/mês.</div>}
             <div style={{display:"flex",gap:10}}><button className="btn ghost" style={{flex:1}} onClick={()=>setModal(null)}>Cancelar</button><button className="btn gold" style={{flex:2}} onClick={()=>comprar(p)}>Confirmar</button></div>
