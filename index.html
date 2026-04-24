@@ -156,6 +156,11 @@ function App(){
   const [fqPass,setFqPass]=useState("");
   const [contaAba,setContaAba]=useState("resumo");
   const [adminSub,setAdminSub]=useState("dash");
+  const [fqSub,setFqSub]=useState("dashboard");
+  const [novoCondo,setNovoCondo]=useState({nome:"",cidade:"",estado:""});
+  const [condoSel,setCondoSel]=useState(null);
+  const [ajLimFranq,setAjLimFranq]=useState(null);
+  const [ajLimVal,setAjLimVal]=useState("");
 
   // Modal state
   const [avNota,setAvNota]=useState(5);
@@ -658,11 +663,6 @@ function App(){
   // ── Franqueadora ─────────────────────────────────────────────────────────────
   if(screen==="franqueadora"){
     const fData=condos.map(c=>{const ct=trans.filter(t=>t.condo_id===c.id);const fat=ct.reduce((a,t)=>a+t.taxa,0);const franq=users.find(u=>u.condo_id===c.id&&u.role==="franqueado");return{...c,fat,royalties:parseFloat((fat*.15).toFixed(2)),transacoes:ct.length,moradores:users.filter(u=>u.condo_id===c.id).length,franqueado:franq}});
-    const [fqSub,setFqSub]=useState("dashboard");
-    const [novoCondo,setNovoCondo]=useState({nome:"",cidade:"",estado:""});
-    const [condoSel,setCondoSel]=useState(null); // condo selected for management
-    const [ajLimFranq,setAjLimFranq]=useState(null); // {userId, atual}
-    const [ajLimVal,setAjLimVal]=useState("");
 
     const criarCondo=async()=>{
       if(!novoCondo.nome||!novoCondo.cidade||!novoCondo.estado)return;
